@@ -81,7 +81,9 @@ recharge toute seule quand l'un des deux change. Toutes les clés sont facultati
     scripts/build-app.sh --no-install  # seulement build/PDF Namer.app
     swift test
 
-`DEVELOPER_DIR` pointe par défaut sur `/Applications/Xcode.app`. On peut aussi ouvrir
+Xcode doit être sélectionné (`sudo xcode-select -s /Applications/Xcode.app/Contents/Developer`) :
+le script compile l'icône (`Resources/AppIcon.icon`, format Icon Composer à calques
+Liquid Glass, modifiable dans Icon Composer) avec `actool`. On peut aussi ouvrir
 `Package.swift` dans Xcode.
 
 ## Origine

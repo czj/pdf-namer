@@ -3,18 +3,25 @@
 # Also installs the CLI as ~/.local/bin/pdf-namer.
 #   scripts/build-app.sh [--no-install]
 set -euo pipefail
-cd "${0:A:h}/.."
+ROOT="${0:A:h:h}"  # absolute: actool resolves relative paths against $PWD, not the cwd
+cd "$ROOT"
 
-export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
 swift build -c release --product PDFNamerApp
 swift build -c release --product pdf-namer
 BIN=$(swift build -c release --show-bin-path)
 
-APP="build/PDF Namer.app"
+APP="$ROOT/build/PDF Namer.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp "$BIN/PDFNamerApp" "$APP/Contents/MacOS/PDFNamerApp"
+# Icon Composer icon (Liquid Glass layers) → Assets.car + AppIcon.icns
+if ! xcrun actool "$ROOT/Resources/AppIcon.icon" --compile "$APP/Contents/Resources" --platform macosx \
+     --minimum-deployment-target 27.0 --app-icon AppIcon \
+     --output-partial-info-plist "$ROOT/build/icon-partial.plist" > "$ROOT/build/actool.log"; then
+  echo "✗ actool : voir build/actool.log" >&2
+  exit 1
+fi
 codesign --force --sign - --timestamp=none "$APP"
 echo "✓ $APP"
 
