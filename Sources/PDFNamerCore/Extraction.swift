@@ -59,11 +59,17 @@ public enum Extractor {
         return Extracted(text: limit(ocr(image) ?? ""), image: image, captureDate: captureDate(url, src))
     }
 
-    /// Page rendered on white at `dpi`, rotation applied.
+    /// Longest side of a rendered page, whatever its declared size: a crafted PDF
+    /// (a watched Downloads folder takes anything) must not make us allocate gigabytes.
+    static let maxRenderSide: CGFloat = 4000
+
+    /// Page rendered on white at `dpi` (capped at maxRenderSide), rotation applied.
     static func render(_ page: PDFPage, dpi: CGFloat) -> CGImage? {
         let box = page.bounds(for: .cropBox)
+        let side = max(box.width, box.height)
+        guard side.isFinite, side > 0 else { return nil }
         let rotated = page.rotation % 180 != 0
-        let scale = dpi / 72
+        let scale = min(dpi / 72, maxRenderSide / side)
         let w = Int(((rotated ? box.height : box.width) * scale).rounded())
         let h = Int(((rotated ? box.width : box.height) * scale).rounded())
         guard w > 0, h > 0,
