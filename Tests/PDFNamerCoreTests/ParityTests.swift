@@ -2,17 +2,33 @@ import Foundation
 import Testing
 @testable import PDFNamerCore
 
-/// The Swift naming rules must give exactly what ~/bin/pdf_namer.py gives
-/// (fixture made by tools/gen_parity.py).
-struct Fixture: Decodable {
-    struct Case: Decodable {
+/// The Swift naming rules must give exactly what the original Python script gives
+/// (fixture made by tools/gen_parity.py). One test case per fixture entry.
+struct Fixture: Decodable, Sendable {
+    struct Case: Decodable, Sendable, CustomTestStringConvertible {
         let fields: [String: String], original: String, capture: String?, expected: String
+        var testDescription: String { "\(fields["type"] ?? "") / \(fields["issuer"] ?? "") → \(expected)" }
     }
-    struct Text: Decodable { let s: String, expected: String }
-    struct OptText: Decodable { let s: String, expected: String? }
-    struct FixCase: Decodable { let s: String, sentence: Bool, expected: String }
-    struct Trim: Decodable { let s: String, limit: Int, expected: String }
-    struct Cand: Decodable { let text: String, expected: [String] }
+    struct Text: Decodable, Sendable, CustomTestStringConvertible {
+        let s: String, expected: String
+        var testDescription: String { s }
+    }
+    struct OptText: Decodable, Sendable, CustomTestStringConvertible {
+        let s: String, expected: String?
+        var testDescription: String { s }
+    }
+    struct FixCase: Decodable, Sendable, CustomTestStringConvertible {
+        let s: String, sentence: Bool, expected: String
+        var testDescription: String { "\(s) (\(sentence ? "phrase" : "nom"))" }
+    }
+    struct Trim: Decodable, Sendable, CustomTestStringConvertible {
+        let s: String, limit: Int, expected: String
+        var testDescription: String { "\(s) ≤ \(limit)" }
+    }
+    struct Cand: Decodable, Sendable, CustomTestStringConvertible {
+        let text: String, expected: [String]
+        var testDescription: String { String(text.prefix(60)) }
+    }
 
     let today: String
     let instructions: String
@@ -33,52 +49,65 @@ struct Fixture: Decodable {
     }()
 }
 
-let fx = Fixture.shared
-let today = Day(iso: fx.today)!
+private let fx = Fixture.shared
+private let today = Day(iso: fx.today)!
 
-@Test func prompts() {
-    #expect(Config.instructions == fx.instructions)
-    #expect(Config.imageInstructions == fx.image_instructions)
-    #expect(Config.types == fx.types)
-    #expect(Config.imageTypes == fx.image_types)
-}
+@Suite struct `Parité avec le script Python` {
+    @Test func `prompts identiques`() {
+        #expect(Config.instructions == fx.instructions)
+        #expect(Config.imageInstructions == fx.image_instructions)
+        #expect(Config.types == fx.types)
+        #expect(Config.imageTypes == fx.image_types)
+    }
 
-@Test func fixCase() {
-    for c in fx.fix_case { #expect(Naming.fixCase(c.s, sentence: c.sentence) == c.expected, "\(c.s) / \(c.sentence)") }
-}
+    @Test(arguments: fx.fix_case)
+    func `casse`(_ c: Fixture.FixCase) {
+        #expect(Naming.fixCase(c.s, sentence: c.sentence) == c.expected)
+    }
 
-@Test func sanitize() {
-    for c in fx.sanitize { #expect(Naming.sanitize(c.s) == c.expected, "\(c.s)") }
-}
+    @Test(arguments: fx.sanitize)
+    func `nettoyage`(_ c: Fixture.Text) {
+        #expect(Naming.sanitize(c.s) == c.expected)
+    }
 
-@Test func parseAmount() {
-    for c in fx.parse_amount { #expect(Naming.parseAmount(c.s) == c.expected, "\(c.s)") }
-}
+    @Test(arguments: fx.parse_amount)
+    func `montant`(_ c: Fixture.OptText) {
+        #expect(Naming.parseAmount(c.s) == c.expected)
+    }
 
-@Test func trimWords() {
-    for c in fx.trim_words { #expect(Naming.trimWords(c.s, c.limit) == c.expected, "\(c.s) / \(c.limit)") }
-}
+    @Test(arguments: fx.trim_words)
+    func `coupe aux mots`(_ c: Fixture.Trim) {
+        #expect(Naming.trimWords(c.s, c.limit) == c.expected)
+    }
 
-@Test func dateCandidates() {
-    for c in fx.date_candidates { #expect(Candidates.dates(c.text, today: today) == c.expected, "\(c.text)") }
-}
+    @Test(arguments: fx.date_candidates)
+    func `dates candidates`(_ c: Fixture.Cand) {
+        #expect(Candidates.dates(c.text, today: today) == c.expected)
+    }
 
-@Test func amountCandidates() {
-    for c in fx.amount_candidates { #expect(Candidates.amounts(c.text) == c.expected, "\(c.text)") }
-}
+    @Test(arguments: fx.amount_candidates)
+    func `montants candidats`(_ c: Fixture.Cand) {
+        #expect(Candidates.amounts(c.text) == c.expected)
+    }
 
-@Test func buildFilename() {
-    for c in fx.build_filename {
-        let got = Naming.buildFilename(c.fields, original: c.original, captureDate: c.capture, today: today)
-        #expect(got == c.expected, "\(c.fields) \(c.original) \(c.capture ?? "-")")
+    @Test(arguments: fx.build_filename)
+    func `nom final`(_ c: Fixture.Case) {
+        #expect(Naming.buildFilename(c.fields, original: c.original, captureDate: c.capture, today: today) == c.expected)
     }
 }
 
-@Test func backupAndNamed() {
+@Test func `sauvegardes et fichiers déjà nommés`() {
     #expect(Files.backupName("x.pdf", day: Day(2026, 10, 1)!) == "RENAME BACKUP 2026-10-01 - x.pdf")
     #expect(Naming.isNamed("2026-11-05 - Facture EDF.pdf"))
     #expect(!Naming.isNamed("2026-11-05-Facture.pdf"))
     #expect("doc.final.pdf".pySplitExt == ("doc.final", ".pdf"))
     #expect(".hidden".pySplitExt == (".hidden", ""))
     #expect("/a/b.c/file".pySplitExt == ("/a/b.c/file", ""))
+}
+
+@Test func `page géante rendue à taille plafonnée`() throws {
+    // A 5 m × 5 m page would be ~28 000 px at 144 dpi without the cap.
+    let page = try #require(PDFKitTestPage.make(width: 14_400, height: 14_400))
+    let img = try #require(Extractor.render(page, dpi: Config.ocrDPI))
+    #expect(max(img.width, img.height) <= Int(Extractor.maxRenderSide))
 }

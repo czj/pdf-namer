@@ -68,7 +68,7 @@ struct PopoverView: View {
                 Spacer()
                 Button("Ajouter…") { model.addFolder() }.buttonStyle(.link)
             } else {
-                Text("Surveille ") + Text(ListFormatter.localizedString(byJoining: active.map(\.name))).bold()
+                Text("Surveille \(Text(active.map(\.name).formatted(.list(type: .and))).bold())")
                 Spacer()
                 Text("actif").font(.caption).foregroundStyle(.secondary)
             }

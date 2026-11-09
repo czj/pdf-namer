@@ -138,7 +138,7 @@ private struct CleanupTab: View {
             }
             Section {
                 HStack {
-                    Button("Faire le ménage maintenant") { model.runHousekeeping() }
+                    Button("Faire le ménage maintenant") { Task { await model.runHousekeeping() } }
                     Spacer()
                     if let last = model.lastHousekeeping { Text(last).font(.caption).foregroundStyle(.secondary) }
                 }

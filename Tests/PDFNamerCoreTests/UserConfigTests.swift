@@ -10,7 +10,7 @@ private func tempDir() throws -> URL {
 
 private func write(_ json: String, _ url: URL) throws { try Data(json.utf8).write(to: url) }
 
-@Test func partialConfigKeepsDefaults() throws {
+@Test func `config partielle : valeurs par défaut pour le reste`() throws {
     let json = #"{"backupDir": "~/Archives", "watchedFolders": [{"path": "~/Downloads"}]}"#
     let c = try JSONDecoder().decode(UserConfig.self, from: Data(json.utf8))
     #expect(c.backupDir == "~/Archives")
@@ -21,7 +21,7 @@ private func write(_ json: String, _ url: URL) throws { try Data(json.utf8).writ
     #expect(!c.confirmBeforeRename)
 }
 
-@Test func localOverridesSharedKeyByKey() throws {
+@Test func `config.local.json remplace config.json clé par clé`() throws {
     let dir = try tempDir()
     defer { try? FileManager.default.removeItem(at: dir) }
     let shared = dir.appendingPathComponent("config.json"), local = dir.appendingPathComponent("config.local.json")
@@ -33,7 +33,7 @@ private func write(_ json: String, _ url: URL) throws { try Data(json.utf8).writ
     #expect(c.watchedFolders.map(\.path) == ["~/Scans"])
 }
 
-@Test func saveLocalWritesOnlyDifferencesAndNeverTouchesShared() throws {
+@Test func `l’app n’écrit que les différences et jamais config.json`() throws {
     let dir = try tempDir()
     defer { try? FileManager.default.removeItem(at: dir) }
     let shared = dir.appendingPathComponent("config.json"), local = dir.appendingPathComponent("config.local.json")
@@ -54,12 +54,12 @@ private func write(_ json: String, _ url: URL) throws { try Data(json.utf8).writ
     #expect(!FileManager.default.fileExists(atPath: local.path))
 }
 
-@Test func missingFilesGiveDefaults() throws {
+@Test func `sans fichier : valeurs par défaut`() throws {
     let none = URL(fileURLWithPath: "/nonexistent/config.json")
     #expect(try UserConfig.load(shared: none, local: none) == UserConfig())
 }
 
-@Test func malformedFileThrows() throws {
+@Test func `fichier invalide : erreur`() throws {
     let dir = try tempDir()
     defer { try? FileManager.default.removeItem(at: dir) }
     let bad = dir.appendingPathComponent("config.json")

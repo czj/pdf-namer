@@ -20,7 +20,7 @@ while let a = args.popFirst() {
     case "--json": json = true
     case "--text":  // debug: what the model is given (text, date and amount candidates)
         for f in args {
-            let ex = try Extractor.extract(URL(fileURLWithPath: f))
+            let ex = try await Extractor.extract(URL(fileURLWithPath: f))
             let t = ex.text ?? ""
             print("── \(f)\n\(t)\n── dates: \(Candidates.dates(t))\n── montants: \(Candidates.amounts(t))")
         }
@@ -65,7 +65,11 @@ if rename && !force {
 guard !urls.isEmpty else { say("✗ Aucun PDF ni image valide"); exit(2) }
 
 if batch { say("── PDF Namer · \(urls.count) fichier(s)\(dryRun ? " · simulation" : "") ──") }
-let extractions = urls.map { url in Task { try await Namer.extract(url) } }  // OCR runs ahead of the model
+/// Reading a file (OCR) overlaps the model's work on the previous one: one file ahead, never more.
+func prefetch(_ i: Int) -> Task<Extracted, Error>? {
+    i < urls.count ? Task { [url = urls[i]] in try await Extractor.extract(url) } : nil
+}
+var nextExtraction = prefetch(0)
 
 let engine: Engine
 do { engine = try Engine() } catch { say("✗ \(error.localizedDescription)"); exit(3) }
@@ -73,7 +77,7 @@ say("✓ Modèle Apple prêt")
 
 if !batch {
     do {
-        guard let s = try await Namer.suggest(urls[0], try await extractions[0].value, engine: engine) else {
+        guard let s = try await Namer.suggest(urls[0], try await nextExtraction!.value, engine: engine) else {
             err("✗ Rien de lisible dans ce fichier"); exit(2)
         }
         if json {
@@ -89,7 +93,7 @@ if !batch {
     exit(0)
 }
 
-let report = Files.housekeeping(backupDir, dryRun: dryRun, backupMaxAgeDays: config.backupMaxAge,
+let report = await Files.housekeeping(backupDir, dryRun: dryRun, backupMaxAgeDays: config.backupMaxAge,
                                 expireMaxAgeDays: customBackupDir ? nil : config.expireMaxAge)
 let would = dryRun ? "seraient " : ""
 if !report.purged.isEmpty {
@@ -106,8 +110,10 @@ let start = Date()
 for (n, url) in urls.enumerated() {
     let filename = url.lastPathComponent, t0 = Date()
     print("\(n + 1)/\(urls.count) avant    \(filename)")
+    let extraction = nextExtraction!
+    nextExtraction = prefetch(n + 1)
     do {
-        guard let s = try await Namer.suggest(url, try await extractions[n].value, engine: engine) else {
+        guard let s = try await Namer.suggest(url, try await extraction.value, engine: engine) else {
             print("  – ignoré   rien de lisible\n"); skipped += 1; continue
         }
         let took = String(format: "%.1fs", Date().timeIntervalSince(t0))

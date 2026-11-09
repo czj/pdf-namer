@@ -1,5 +1,6 @@
 import AppKit
 import Observation
+import OSLog
 import PDFNamerCore
 import ServiceManagement
 import SwiftUI
@@ -14,7 +15,7 @@ struct RecentEntry: Codable, Identifiable {
 }
 
 /// One file going through the pipeline.
-@Observable @MainActor
+@Observable
 final class Item: Identifiable {
     enum Phase: Equatable {
         case waiting, reading, analyzing, proposed, done, unchanged, cancelled
@@ -40,7 +41,7 @@ final class Item: Identifiable {
 
 enum EngineState: Equatable { case loading, ready, unavailable(String) }
 
-@Observable @MainActor
+@Observable
 final class AppModel {
     var engineState: EngineState = .loading
     var items: [Item] = []
@@ -64,7 +65,8 @@ final class AppModel {
     @ObservationIgnored private var engine: Engine?
     @ObservationIgnored private var worker: Task<Void, Never>?
     @ObservationIgnored private var watchers: [String: FolderWatcher] = [:]
-    @ObservationIgnored private var housekeepingTimer: Timer?
+    @ObservationIgnored private var housekeepingLoop: Task<Void, Never>?
+    @ObservationIgnored private let log = Logger(subsystem: "com.github.czj.pdf-namer", category: "app")
 
     var isBusy: Bool { items.contains { $0.phase.isPending } }
     var finishedCount: Int { items.filter { !$0.phase.isPending }.count }
@@ -82,9 +84,11 @@ final class AppModel {
             engineState = .unavailable(error.localizedDescription)
         }
         syncWatchers()
-        runHousekeeping()
-        housekeepingTimer = Timer.scheduledTimer(withTimeInterval: 86400, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.runHousekeeping() }
+        housekeepingLoop = Task { [weak self] in  // at launch, then daily
+            while !Task.isCancelled {
+                await self?.runHousekeeping()
+                try? await Task.sleep(for: .seconds(86400))
+            }
         }
         if hasBundle { UNUserNotificationCenter.current().requestAuthorization(options: [.alert]) { _, _ in } }
     }
@@ -106,11 +110,7 @@ final class AppModel {
         for url in files where Config.isSupported(url) {
             guard !items.contains(where: { $0.url == url && $0.phase.isPending }) else { continue }
             let item = Item(url: url, source: source)
-            if Naming.isNamed(url.lastPathComponent) {
-                item.phase = .skipped("déjà nommé (« AAAA-MM-JJ - … »)")
-            } else {
-                item.extraction = Task.detached(priority: .userInitiated) { try Extractor.extract(url) }
-            }
+            if Naming.isNamed(url.lastPathComponent) { item.phase = .skipped("déjà nommé (« AAAA-MM-JJ - … »)") }
             items.append(item)
         }
         if worker == nil { worker = Task { await drain() } }
@@ -123,11 +123,22 @@ final class AppModel {
         worker = nil
     }
 
+    /// Start reading a file (render + OCR, off the main actor) if it isn't already.
+    private func startExtraction(_ item: Item) -> Task<Extracted, Error> {
+        if let task = item.extraction { return task }
+        let task = Task { [url = item.url] in try await Extractor.extract(url) }
+        item.extraction = task
+        return task
+    }
+
     private func process(_ item: Item) async {
         let t0 = Date()
         do {
             item.phase = .reading
-            guard let ex = try await item.extraction?.value else { return }
+            let extraction = startExtraction(item)
+            // Overlap the next file's OCR with this file's model call: one file ahead, never more.
+            if let next = items.first(where: { $0.phase == .waiting }) { _ = startExtraction(next) }
+            let ex = try await extraction.value
             guard let engine else { throw EngineError.unavailable("non chargé") }
             item.phase = .analyzing
             guard let s = try await Namer.suggest(item.url, ex, engine: engine) else {
@@ -255,13 +266,11 @@ final class AppModel {
 
     // MARK: Housekeeping, login item
 
-    func runHousekeeping() {
-        let dir = backupDir, s = settings
-        Task.detached(priority: .background) {
-            let r = Files.housekeeping(dir, backupMaxAgeDays: s.backupMaxAge, expireMaxAgeDays: s.expireMaxAge)
-            let msg = "\(r.purged.count) sauvegarde(s) supprimée(s), \(r.trashed.count) élément(s) mis à la corbeille"
-            await MainActor.run { self.lastHousekeeping = msg }
-        }
+    func runHousekeeping() async {
+        let r = await Files.housekeeping(backupDir, backupMaxAgeDays: settings.backupMaxAge,
+                                         expireMaxAgeDays: settings.expireMaxAge)
+        lastHousekeeping = "\(r.purged.count) sauvegarde(s) supprimée(s), \(r.trashed.count) élément(s) mis à la corbeille"
+        log.info("Ménage : \(r.purged.count) sauvegarde(s), \(r.trashed.count) élément(s) à la corbeille")
     }
 
     var launchAtLogin: Bool {
@@ -270,7 +279,7 @@ final class AppModel {
             do {
                 if newValue { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
             } catch {
-                NSLog("PDF Namer: login item: \(error)")
+                log.error("Ouverture au démarrage : \(error.localizedDescription, privacy: .public)")
             }
         }
     }

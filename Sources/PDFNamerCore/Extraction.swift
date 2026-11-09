@@ -1,4 +1,3 @@
-import AppKit
 import CoreServices
 import Foundation
 import ImageIO
@@ -6,25 +5,27 @@ import PDFKit
 import UniformTypeIdentifiers
 import Vision
 
-/// What we can read from a file: its text, a page image for the model, and (images) the shot date.
-public struct Extracted: @unchecked Sendable {
+/// What we can read from a file: its text, page 1 as PNG for the model, and (images) the shot date.
+public struct Extracted: Sendable {
     public var text: String?
-    public var image: CGImage?
+    public var imagePNG: Data?
     public var captureDate: String?
-    public var isEmpty: Bool { text == nil && image == nil }
+    public var isEmpty: Bool { text == nil && imagePNG == nil }
 }
 
 public enum ExtractionError: LocalizedError {
     case unreadable(String)
     public var errorDescription: String? {
-        switch self { case .unreadable(let name): return "Impossible d’ouvrir \(name)" }
+        switch self { case .unreadable(let name): "Impossible d’ouvrir \(name)" }
     }
 }
 
 public enum Extractor {
     /// PDF: native text (Vision OCR for scans) + page 1. Image: OCR + downscaled image + shot date.
-    public static func extract(_ url: URL) throws -> Extracted {
-        Config.isImage(url) ? try extractImage(url) : try extractPDF(url)
+    /// Rendering and OCR are CPU-heavy, so this always runs off the caller's actor.
+    @concurrent
+    public static func extract(_ url: URL) async throws -> Extracted {
+        Config.isImage(url) ? try await extractImage(url) : try await extractPDF(url)
     }
 
     static func limit(_ text: String) -> String? {
@@ -32,19 +33,23 @@ public enum Extractor {
         return t.isEmpty ? nil : t
     }
 
-    static func extractPDF(_ url: URL) throws -> Extracted {
+    static func extractPDF(_ url: URL) async throws -> Extracted {
         guard let doc = PDFDocument(url: url) else { throw ExtractionError.unreadable(url.lastPathComponent) }
         let pages = (0..<min(doc.pageCount, Config.maxPages)).compactMap { doc.page(at: $0) }
         let image = pages.first.flatMap { render($0, dpi: Config.imageDPI) }
         var text = pages.map { $0.string ?? "" }.joined(separator: "\n").pyStrip
         if text.isEmpty {  // scan: OCR each page at 144 dpi
-            text = pages.compactMap { render($0, dpi: Config.ocrDPI).flatMap(ocr) }
-                .filter { !$0.isEmpty }.joined(separator: "\n").pyStrip
+            var parts: [String] = []
+            for page in pages {
+                try Task.checkCancellation()
+                if let img = render(page, dpi: Config.ocrDPI), let t = await ocr(img), !t.isEmpty { parts.append(t) }
+            }
+            text = parts.joined(separator: "\n").pyStrip
         }
-        return Extracted(text: limit(text), image: image, captureDate: nil)
+        return Extracted(text: limit(text), imagePNG: image.flatMap(png), captureDate: nil)
     }
 
-    static func extractImage(_ url: URL) throws -> Extracted {
+    static func extractImage(_ url: URL) async throws -> Extracted {
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else {
             throw ExtractionError.unreadable(url.lastPathComponent)
         }
@@ -56,7 +61,8 @@ public enum Extractor {
         guard let image = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else {
             throw ExtractionError.unreadable(url.lastPathComponent)
         }
-        return Extracted(text: limit(ocr(image) ?? ""), image: image, captureDate: captureDate(url, src))
+        let date = captureDate(url, src)
+        return Extracted(text: limit(await ocr(image) ?? ""), imagePNG: png(image), captureDate: date)
     }
 
     /// Longest side of a rendered page, whatever its declared size: a crafted PDF
@@ -83,15 +89,14 @@ public enum Extractor {
         return ctx.makeImage()
     }
 
-    /// macOS Vision OCR on one image. Accurate mode (the Python script used fast): slower,
-    /// but far fewer misread digits on pale scans and receipts.
-    public static func ocr(_ image: CGImage) -> String? {
-        let req = VNRecognizeTextRequest()
-        req.recognitionLevel = .accurate
-        req.recognitionLanguages = ["fr-FR", "en-US", "de-DE", "es-ES", "it-IT"]
-        req.usesLanguageCorrection = true
-        do { try VNImageRequestHandler(cgImage: image).perform([req]) } catch { return nil }
-        return (req.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
+    /// Vision OCR on one image, accurate mode (the Python script used fast: far more misread digits).
+    public static func ocr(_ image: CGImage) async -> String? {
+        var request = RecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.recognitionLanguages = ["fr-FR", "en-US", "de-DE", "es-ES", "it-IT"].map { Locale.Language(identifier: $0) }
+        request.usesLanguageCorrection = true
+        guard let observations = try? await request.perform(on: image) else { return nil }
+        return observations.compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
     }
 
     static let exifDate = Rx(#"^(\d{4}):(\d{2}):(\d{2})"#)
@@ -114,11 +119,13 @@ public enum Extractor {
         return Day(created).iso
     }
 
-    /// PNG written to a temporary file (the model takes images by URL).
-    public static func writePNG(_ image: CGImage, to url: URL) throws {
-        guard let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil)
-        else { throw ExtractionError.unreadable(url.lastPathComponent) }
+    /// PNG bytes (the model takes images by URL, so they get written to a temporary file).
+    static func png(_ image: CGImage) -> Data? {
+        let data = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil) else {
+            return nil
+        }
         CGImageDestinationAddImage(dest, image, nil)
-        guard CGImageDestinationFinalize(dest) else { throw ExtractionError.unreadable(url.lastPathComponent) }
+        return CGImageDestinationFinalize(dest) ? data as Data : nil
     }
 }

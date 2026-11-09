@@ -1,24 +1,29 @@
 import Foundation
+import OSLog
 import PDFNamerCore
 
 /// Reports PDFs and images that newly arrive in a folder, once their size has settled
 /// (a scanner or a download may still be writing). Files present at start are left alone,
 /// and so are files already named "AAAA-MM-JJ - …".
-@MainActor
 final class FolderWatcher {
     private let url: URL
     private let onNew: ([URL]) -> Void
     private var source: DispatchSourceFileSystemObject?
     private var known: Set<String>
     private var pending: [String: Int] = [:]  // path → last seen size
-    private var checkScheduled = false
+    private var settling: Task<Void, Never>?
 
     init(_ url: URL, onNew: @escaping ([URL]) -> Void) {
         self.url = url
         self.onNew = onNew
         known = Set(Self.candidates(in: url).map(\.path))
         let fd = open(url.path, O_EVTONLY)
-        guard fd >= 0 else { NSLog("PDF Namer: impossible de surveiller \(url.path)"); return }
+        guard fd >= 0 else {
+            Logger(subsystem: "com.github.czj.pdf-namer", category: "watch")
+                .error("Impossible de surveiller \(url.path, privacy: .private)")
+            return
+        }
+        // Dispatch sources predate Swift concurrency; the handler runs on the main queue.
         let src = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write, .rename], queue: .main)
         src.setEventHandler { [weak self] in MainActor.assumeIsolated { self?.scan() } }
         src.setCancelHandler { close(fd) }
@@ -26,7 +31,10 @@ final class FolderWatcher {
         source = src
     }
 
-    deinit { source?.cancel() }
+    isolated deinit {
+        source?.cancel()
+        settling?.cancel()
+    }
 
     func ignore(_ file: URL) { known.insert(file.path) }
 
@@ -37,25 +45,22 @@ final class FolderWatcher {
     }
 
     private func scan() {
-        let present = Self.candidates(in: url)
         known = known.filter { FileManager.default.fileExists(atPath: $0) }  // forget files that left
-        for file in present where !known.contains(file.path) && pending[file.path] == nil {
+        for file in Self.candidates(in: url) where !known.contains(file.path) && pending[file.path] == nil {
             pending[file.path] = -1
         }
-        scheduleCheck()
-    }
-
-    private func scheduleCheck() {
-        guard !pending.isEmpty, !checkScheduled else { return }
-        checkScheduled = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            MainActor.assumeIsolated { self?.check() }
+        guard !pending.isEmpty, settling == nil else { return }
+        settling = Task { [weak self] in
+            while let self, !self.pending.isEmpty {
+                try? await Task.sleep(for: .seconds(1.5))
+                self.check()
+            }
+            self?.settling = nil
         }
     }
 
     /// Emit files whose size did not change since the last look.
     private func check() {
-        checkScheduled = false
         var ready: [URL] = []
         for (path, last) in pending {
             guard let size = (try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? Int else {
@@ -71,6 +76,5 @@ final class FolderWatcher {
             }
         }
         if !ready.isEmpty { onNew(ready.sorted { $0.path < $1.path }) }
-        scheduleCheck()
     }
 }

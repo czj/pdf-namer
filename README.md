@@ -12,7 +12,11 @@ factures, reçus, devis, avoirs, quittances et notes de frais. Photos et capture
 prennent la date de prise de vue. Noms et prompts sont en français.
 
 **Prérequis :** macOS 27 ou plus récent, Apple Intelligence activé
-(Réglages → Apple Intelligence et Siri), Xcode pour compiler.
+(Réglages → Apple Intelligence et Siri), Xcode 27 (Swift 6.4) pour compiler.
+
+Écrit en Swift 6.4 en mode de langage Swift 6 (concurrence vérifiée par le compilateur),
+avec Approachable Concurrency : l'app et la commande vivent sur l'acteur principal, le
+rendu et l'OCR passent en `@concurrent`.
 
 ## L'app de barre de menus
 

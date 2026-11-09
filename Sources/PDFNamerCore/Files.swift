@@ -3,7 +3,7 @@ import Foundation
 /// Renaming with backups, and the backup folder housekeeping.
 public enum Files {
     static let backupRe = Rx("^\(NSRegularExpression.escapedPattern(for: Config.backupPrefix)) (\\d{4}-\\d{2}-\\d{2}) - ")
-    static let fm = FileManager.default
+    static var fm: FileManager { .default }
 
     /// "x.pdf" → "RENAME BACKUP 2026-10-01 - x.pdf" (backup date hard-coded in the name).
     public static func backupName(_ filename: String, day: Day = .today()) -> String {
@@ -43,9 +43,10 @@ public enum Files {
     }
 
     /// Purge old RENAME BACKUPs, then (if asked) trash the folder's other expired items.
-    /// nil ages mean "never".
+    /// nil ages mean "never". Walks a whole folder tree, so it runs off the caller's actor.
+    @concurrent
     public static func housekeeping(_ folder: URL, dryRun: Bool = false,
-                                    backupMaxAgeDays: Int?, expireMaxAgeDays: Int?) -> Report {
+                                    backupMaxAgeDays: Int?, expireMaxAgeDays: Int?) async -> Report {
         var report = Report()
         guard fm.fileExists(atPath: folder.path) else { return report }
         if let days = backupMaxAgeDays { report.purged = purgeOldBackups(folder, maxAgeDays: days, dryRun: dryRun) }
